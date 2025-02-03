@@ -135,6 +135,24 @@ class Authentication(Model):
         return is_password_usable(self.password)
 
 
+class ResetPassword(Model):
+    id = UUIDField(primary_key=True, default=uuid4, editable=False)
+    created_at = DateTimeField(default=timezone.now)
+    challenge = CharField(max_length=128, null=True)
+    authentication = OneToOneField(Authentication, on_delete=CASCADE)
+
+    class Meta:
+        db_table = 'reset_password'
+        verbose_name = 'Reset Password'
+        verbose_name_plural = 'Reset Passwords'
+        indexes = [
+            Index(fields=['authentication']),
+        ]
+
+    def set_challenge(self, challenge):
+        self.challenge = make_password(challenge)
+
+
 class WebAuthnCredential(Model):
     id = UUIDField(primary_key=True, default=uuid4, editable=False)
     created_at = DateTimeField(auto_now_add=True)

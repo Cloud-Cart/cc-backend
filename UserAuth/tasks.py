@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from django.conf import settings
+from django.core.mail import send_mail
 
 from CloudCart.celery import app
 from UserAuth.choices import OTPPurpose
@@ -17,6 +18,13 @@ def generate_and_send_verification_otp(user_id: UUID):
         message=f"Your OTP is {otp}",
         from_email=settings.DEFAULT_FROM_EMAIL,
     )
+
+
+@app.task
+def send_reset_password_email(email: str, challenge):
+    subject = "Reset Password"
+    message = f"""Click here to reset your password: {challenge}"""
+    send_mail(subject, message, from_email=settings.DEFAULT_FROM_EMAIL, recipient_list=[email])
 
 
 @app.task

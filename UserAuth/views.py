@@ -5,7 +5,7 @@ from django.conf import settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError, PermissionDenied, MethodNotAllowed
+from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.parsers import JSONParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.request import Request
@@ -24,10 +24,11 @@ from UserAuth.models import OTPAuthentication, HOTPAuthentication, Authenticatio
 from UserAuth.permissions import IsOwnAuthenticator
 from UserAuth.serializers import RegisterSerializer, VerifyEmailOTPSerializer, AuthenticatorAppSerializer, \
     LoginSerializer, RecoverAccountSerializer, RecoveryCodeSerializer, \
-    UpdatePasswordSerializer, AuthenticationMethodsSerializer, TwoFactorSettingsSerializer, VerifyHOTPAppSerializer
+    UpdatePasswordSerializer, AuthenticationMethodsSerializer, TwoFactorSettingsSerializer, VerifyHOTPAppSerializer, \
+    ResetPasswordRequestSerializer
 from UserAuth.social_login import SocialAuthHandler
 from UserAuth.tasks import send_new_authentication_app_created_email, generate_and_send_verification_otp, \
-    send_2fa_otp, send_recovered_email_notification
+    send_2fa_otp, send_recovered_email_notification, send_reset_password_email
 from Users.models import User
 
 
@@ -515,6 +516,22 @@ class PasskeyViewSet(GenericViewSet):
             status=status_code,
             data=data,
         )
+
+
+class ResetPasswordViewSet(GenericViewSet):
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='send-email',
+        permission_classes=[AllowAny],
+        serializer_class=ResetPasswordRequestSerializer,
+    )
+    def request_password_reset(self, request: Request, *args, **kwargs):
+        ser: ResetPasswordRequestSerializer = self.serializer_class(data=request.data)
+        ser.is_valid(raise_exception=True)
+        challenge, email = ser.save()
+        send_reset_password_email.delay(email, challenge)
+        return Response(status=status.HTTP_200_OK, data={'success': True})
 
 
 class SocialLoginViewSet(GenericViewSet):

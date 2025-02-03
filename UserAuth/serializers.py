@@ -1,5 +1,6 @@
 import os
 import re
+from uuid import uuid4
 
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -8,7 +9,7 @@ from rest_framework.fields import CharField, SerializerMethodField, EmailField
 from rest_framework.serializers import ModelSerializer, Serializer
 
 from UserAuth.models import Authentication, HOTPAuthentication, OTPAuthentication, IncompleteLoginSessions, \
-    RecoveryCode, SecondStepVerificationConfig
+    RecoveryCode, SecondStepVerificationConfig, ResetPassword
 from Users.models import User
 
 
@@ -374,3 +375,26 @@ class BeginRegisterPasskeySerializer(Serializer):
     @staticmethod
     def get_exclude_credentials(instance: Authentication):
         return []
+
+
+class ResetPasswordRequestSerializer(Serializer):
+    email = EmailField(write_only=True)
+
+    def validate_email(self, email: str):
+        try:
+            self.instance = User.objects.select_related('authentication').get(email=email)
+        except User.DoesNotExist:
+            raise ValidationError(_('User does not exist.'))
+        return email
+
+    def save(self, **kwargs):
+        reset_password, _ = ResetPassword.objects.update_or_create(
+            authentication=self.instance.authentication,
+            defaults={
+                'created_at': timezone.now(),
+            }
+        )
+        challenge = str(uuid4())
+        reset_password.set_challenge(challenge)
+        reset_password.save()
+        return challenge, self.instance.email
