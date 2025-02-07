@@ -1,13 +1,15 @@
 import uuid
 
 from django.contrib.auth.models import AbstractUser
-from django.db.models import UUIDField, BooleanField, CharField, EmailField
+from django.db.models import UUIDField, BooleanField, CharField, EmailField, DateTimeField
 from django.utils.translation import gettext_lazy as _
 
 from Users.managers import UserManager
 
 
 class User(AbstractUser):
+    created_at = DateTimeField(auto_now_add=True)
+    updated_at = DateTimeField(auto_now=True)
     id = UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     first_name = CharField(_("First Name"), max_length=150, blank=True)
     last_name = CharField(_("Last Name"), max_length=150, blank=True)

@@ -1,3 +1,4 @@
+from urllib.parse import urlencode
 from uuid import UUID
 
 from django.conf import settings
@@ -21,9 +22,15 @@ def generate_and_send_verification_otp(user_id: UUID):
 
 
 @app.task
-def send_reset_password_email(email: str, challenge):
+def send_reset_password_email(email: str, token: str):
     subject = "Reset Password"
-    message = f"""Click here to reset your password: {challenge}"""
+    search_queryparams: dict[str, str] = {
+        settings.RESET_PASSWORD_URL_TOKEN_KEY: token,
+    }
+    url = settings.FRONTEND_RESET_PASSWORD_URL + '?' + urlencode(search_queryparams)
+
+    message = """Please click the link below to reset your password:
+    <a href="{url}">{url}</a>""".format(url=url)
     send_mail(subject, message, from_email=settings.DEFAULT_FROM_EMAIL, recipient_list=[email])
 
 

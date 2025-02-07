@@ -237,3 +237,7 @@ MICROSOFT_TENANT_ID = env.str('MICROSOFT_TENANT_ID', default=None)
 # Facebook Social Login
 FACEBOOK_APP_ID = env.str('FACEBOOK_APP_ID', default=None)
 FACEBOOK_APP_SECRET = env.str('FACEBOOK_APP_SECRET', default=None)
+
+FRONTEND_RESET_PASSWORD_URL = env.str('FRONTEND_RESET_PASSWORD_URL', default=None)
+# You should include "<email>" and "<challenge" as key of variables, values will be taken as search query params key
+RESET_PASSWORD_URL_TOKEN_KEY = env.str('RESET_PASSWORD_URL_TOKEN_KEY', default='token')

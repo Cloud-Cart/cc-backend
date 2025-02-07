@@ -5,6 +5,7 @@ from uuid import uuid4
 from django.contrib.auth.hashers import make_password, check_password, acheck_password, is_password_usable
 from django.db.models import Model, CASCADE, OneToOneField, UUIDField, Index, CharField, DateTimeField, EmailField, \
     BooleanField, ForeignKey, PositiveSmallIntegerField, IntegerField, BinaryField
+from django.db.models.fields import DurationField
 from django.utils import timezone
 from pyotp import random_base32, TOTP
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -138,6 +139,7 @@ class Authentication(Model):
 class ResetPassword(Model):
     id = UUIDField(primary_key=True, default=uuid4, editable=False)
     created_at = DateTimeField(default=timezone.now)
+    expire_in = DurationField(default=timedelta(minutes=15))
     challenge = CharField(max_length=128, null=True)
     authentication = OneToOneField(Authentication, on_delete=CASCADE)
 
@@ -151,6 +153,12 @@ class ResetPassword(Model):
 
     def set_challenge(self, challenge):
         self.challenge = make_password(challenge)
+
+    def check_challenge(self, raw_challenge):
+        if timezone.now() > (self.created_at + self.expire_in):
+            self.delete()
+            return False
+        return check_password(raw_challenge, self.challenge)
 
 
 class WebAuthnCredential(Model):
