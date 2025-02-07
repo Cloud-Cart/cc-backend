@@ -1,6 +1,8 @@
 import os
 import re
+from datetime import datetime, timedelta
 
+from django.core import signing
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework.exceptions import ValidationError
@@ -374,3 +376,93 @@ class BeginRegisterPasskeySerializer(Serializer):
     @staticmethod
     def get_exclude_credentials(instance: Authentication):
         return []
+
+
+class ResetPasswordRequestSerializer(Serializer):
+    email = EmailField(write_only=True)
+
+    def validate_email(self, email: str):
+        try:
+            self.instance = User.objects.select_related('authentication').get(email=email)
+        except User.DoesNotExist:
+            raise ValidationError(_('User does not exist.'))
+        return email
+
+    @property
+    def token(self):
+        if not self.instance:
+            raise AssertionError('Cannot reset password without an instance.')
+        return signing.dumps({
+            'user_id': str(self.instance.id),
+            'created_at': timezone.now().isoformat(),
+            'user_updated_at': self.instance.updated_at.isoformat()
+        })
+
+    def save(self, **kwargs):
+        return self.instance, self.token
+
+
+class ResetPasswordVerifySerializer(Serializer):
+    token = CharField(write_only=True, required=True)
+    first_name = CharField(read_only=True)
+    last_name = CharField(read_only=True)
+    email = EmailField(read_only=True)
+
+    @staticmethod
+    def decrypt(token: str):
+        return signing.loads(token)
+
+    def validate(self, attrs: dict):
+        token = attrs.get('token')
+        try:
+            data = self.decrypt(token)
+            created_at = datetime.fromisoformat(data.get('created_at'))
+            user_updated_at = datetime.fromisoformat(data.get('user_updated_at'))
+            user_id = data.get('user_id')
+        except (signing.BadSignature, KeyError):
+            raise ValidationError({
+                'token': _('URL is invalid.'),
+            })
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            raise ValidationError({
+                'token': _('URL is invalid.'),
+            })
+        if user.updated_at != user_updated_at:
+            raise ValidationError({
+                'token': _('URL expired.')
+            })
+        if (created_at + timedelta(minutes=30)) <= timezone.now():
+            raise ValidationError({
+                'token': _('URL is expired.'),
+            })
+        self.instance = user
+        return {
+            'created_at': created_at,
+            'updated_at': user_updated_at,
+            'user': user,
+        }
+
+    def save(self, **kwargs):
+        return self.instance
+
+
+class ResetPasswordSerializer(Serializer):
+    password_1 = CharField(write_only=True)
+    password_2 = CharField(write_only=True)
+
+    def validate(self, attrs):
+        password1 = attrs.get('password_1')
+        password2 = attrs.get('password_2')
+        if password1 != password2:
+            raise ValidationError({
+                'password1': _('Passwords do not match.'),
+            })
+        return attrs
+
+    def save(self, **kwargs):
+        password1 = self.validated_data.get('password_1')
+        self.instance.set_password(password1)
+        self.instance.save()
+        return self.instance

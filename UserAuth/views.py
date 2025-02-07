@@ -5,7 +5,7 @@ from django.conf import settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError, PermissionDenied, MethodNotAllowed
+from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.parsers import JSONParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.request import Request
@@ -17,17 +17,18 @@ from webauthn.helpers import generate_challenge, parse_registration_credential_j
     parse_authentication_credential_json
 from webauthn.helpers.structs import PublicKeyCredentialDescriptor, PublicKeyCredentialType
 
-from UserAuth.authentications import IncompleteLoginAuthentication
+from UserAuth.authentications import IncompleteLoginAuthentication, ResetPasswordAuthentication
 from UserAuth.choices import OTPPurpose
 from UserAuth.models import OTPAuthentication, HOTPAuthentication, Authentication, RecoveryCode, WebAuthnCredential, \
     SecondStepVerificationConfig
 from UserAuth.permissions import IsOwnAuthenticator
 from UserAuth.serializers import RegisterSerializer, VerifyEmailOTPSerializer, AuthenticatorAppSerializer, \
     LoginSerializer, RecoverAccountSerializer, RecoveryCodeSerializer, \
-    UpdatePasswordSerializer, AuthenticationMethodsSerializer, TwoFactorSettingsSerializer, VerifyHOTPAppSerializer
+    UpdatePasswordSerializer, AuthenticationMethodsSerializer, TwoFactorSettingsSerializer, VerifyHOTPAppSerializer, \
+    ResetPasswordRequestSerializer, ResetPasswordVerifySerializer, ResetPasswordSerializer
 from UserAuth.social_login import SocialAuthHandler
 from UserAuth.tasks import send_new_authentication_app_created_email, generate_and_send_verification_otp, \
-    send_2fa_otp, send_recovered_email_notification
+    send_2fa_otp, send_recovered_email_notification, send_reset_password_email
 from Users.models import User
 
 
@@ -515,6 +516,54 @@ class PasskeyViewSet(GenericViewSet):
             status=status_code,
             data=data,
         )
+
+
+class ResetPasswordViewSet(GenericViewSet):
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='send-email',
+        permission_classes=[AllowAny],
+        serializer_class=ResetPasswordRequestSerializer,
+    )
+    def request_password_reset(self, request: Request, *args, **kwargs):
+        ser: ResetPasswordRequestSerializer = self.serializer_class(data=request.data)
+        ser.is_valid(raise_exception=True)
+        user, token = ser.save()
+        send_reset_password_email.delay(user.email, token)
+        return Response(status=status.HTTP_200_OK, data={'success': True})
+
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='verify-challenge',
+        permission_classes=[AllowAny],
+        authentication_classes=[ResetPasswordAuthentication],
+        serializer_class=ResetPasswordVerifySerializer,
+    )
+    def verify_password_reset_challenge(self, request: Request, *args, **kwargs):
+        ser = self.serializer_class(data=request.data)
+        ser.is_valid(raise_exception=True)
+        user: User = ser.save()
+        request.session['reset_password_user_id'] = str(user.id)
+        request.session.set_expiry(timedelta(minutes=30))
+        request.session.save()
+        return Response(status=status.HTTP_200_OK, data=ser.data)
+
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='reset',
+        permission_classes=[IsAuthenticated],
+        authentication_classes=[ResetPasswordAuthentication],
+        serializer_class=ResetPasswordSerializer,
+    )
+    def reset_password(self, request: Request, *args, **kwargs):
+        ser: ResetPasswordSerializer = self.get_serializer(data=request.data, instance=request.user)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        request.session.delete('reset_password_user_id')
+        return Response(status=status.HTTP_200_OK, data=ser.data)
 
 
 class SocialLoginViewSet(GenericViewSet):
