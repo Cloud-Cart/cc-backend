@@ -345,6 +345,8 @@ class LoginViewSet(GenericViewSet):
             data = ser.data
         return Response(data, status=status_code)
 
+
+class SecondStepLoginViewSet(GenericViewSet):
     @action(
         detail=False,
         methods=["GET"],

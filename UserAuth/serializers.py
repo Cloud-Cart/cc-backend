@@ -245,12 +245,18 @@ class VerifyHOTPAppSerializer(Serializer):
         config: SecondStepVerificationConfig = self.instance
 
         if not config.is_2fa_enabled:
-            raise ValidationError(_('2 Step Verification not enabled.'))
+            raise ValidationError({
+                'otp': _('2 Step Verification not enabled.')
+            })
 
         if not config.hotp_authentications.filter(is_active=True).exists():
-            raise ValidationError(_('OTP verification failed. Use any of the available method.'))
+            raise ValidationError({
+                'otp': _('Authenticator verification failed. Use any of the available method.')
+            })
         if not self.verify_authenticator_app(otp):
-            raise ValidationError(_('OTP verification failed. Invalid OTP'))
+            raise ValidationError({
+                'otp': _('Authenticator verification failed. Invalid OTP')
+            })
         return attrs
 
     def verify_authenticator_app(self, otp):
