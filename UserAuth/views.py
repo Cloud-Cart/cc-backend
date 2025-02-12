@@ -23,12 +23,12 @@ from UserAuth.models import OTPAuthentication, HOTPAuthentication, Authenticatio
     SecondStepVerificationConfig
 from UserAuth.permissions import IsOwnAuthenticator
 from UserAuth.serializers import RegisterSerializer, VerifyEmailOTPSerializer, AuthenticatorAppSerializer, \
-    LoginSerializer, RecoverAccountSerializer, RecoveryCodeSerializer, \
+    LoginSerializer, RecoveryCodeSerializer, \
     UpdatePasswordSerializer, AuthenticationMethodsSerializer, TwoFactorSettingsSerializer, VerifyHOTPAppSerializer, \
-    ResetPasswordRequestSerializer, ResetPasswordVerifySerializer, ResetPasswordSerializer
+    ResetPasswordRequestSerializer, ResetPasswordVerifySerializer, ResetPasswordSerializer, RecoverAccountSerializer
 from UserAuth.social_login import SocialAuthHandler
 from UserAuth.tasks import send_new_authentication_app_created_email, generate_and_send_verification_otp, \
-    send_2fa_otp, send_recovered_email_notification, send_reset_password_email
+    send_2fa_otp, send_reset_password_email
 from Users.models import User
 
 
@@ -247,23 +247,8 @@ class AuthenticationViewSet(GenericViewSet):
                 },
                 status=status.HTTP_409_CONFLICT
             )
-        auth.is_2fa_enabled = False
         auth.save()
         return Response(data={}, status=status.HTTP_200_OK)
-
-    @action(
-        detail=False,
-        methods=["POST"],
-        url_path="recover-account",
-        permission_classes=[AllowAny],
-        serializer_class=RecoverAccountSerializer
-    )
-    def recover_account(self, request, *args, **kwargs):
-        ser = self.get_serializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        auth: Authentication = ser.save()
-        send_recovered_email_notification.delay(str(auth.user_id))
-        return Response(ser.data, status=status.HTTP_200_OK)
 
     @action(
         detail=False,
@@ -420,6 +405,22 @@ class SecondStepLoginViewSet(GenericViewSet):
         serializer.save()
         request.session.delete('incomplete_login_session_id')
         return Response(second_step_config.authentication.auth_tokens)
+
+    @action(
+        detail=False,
+        methods=["POST"],
+        url_path='recover-account',
+        permission_classes=[IsAuthenticated],
+        authentication_classes=(IncompleteLoginAuthentication,),
+        serializer_class=RecoverAccountSerializer
+    )
+    def recover_account(self, request, *args, **kwargs):
+        user: User = request.user
+        ser = self.get_serializer(instance=user.authentication.secondstep_verification, data=request.data)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        request.session.delete('incomplete_login_session_id')
+        return Response(ser.data)
 
 
 class PasskeyViewSet(GenericViewSet):

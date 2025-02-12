@@ -276,51 +276,32 @@ class VerifyHOTPAppSerializer(Serializer):
 
 
 class RecoverAccountSerializer(Serializer):
-    email = CharField(write_only=True, required=True)
     recovery_code = CharField(write_only=True, required=True)
-    password = CharField(write_only=True, required=True)
-    confirm_password = CharField(write_only=True, required=True)
-    recovery_obj = None
 
-    def validate(self, attrs):
-        email = attrs.get('email')
-        recovery_code = attrs.get('recovery_code')
-        password = attrs.get('password')
-        confirm_password = attrs.get('confirm_password')
-        errors = {}
-        if password != confirm_password:
-            errors['confirm_password'] = _('Passwords do not match.')
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.recovery_obj = None
 
-        try:
-            self.instance = Authentication.objects.get(email=email)
-        except Authentication.DoesNotExist:
-            errors['email'] = _('User does not exist.')
-            raise ValidationError(errors)
+    def validate_recovery_code(self, value):
         try:
             self.recovery_obj = RecoveryCode.objects.get(
-                authentication=self.instance,
-                code=recovery_code,
+                second_step_config=self.instance,
+                code=value,
                 is_used=False,
             )
         except RecoveryCode.DoesNotExist:
-            errors['recovery_code'] = _('Recovery code does not exist.')
-            raise ValidationError(errors)
-        if len(errors.keys()) > 0:
-            raise ValidationError(errors)
-        return attrs
+            raise ValidationError(_('Recovery code is invalid or already used.'))
+        return value
 
     def save(self, **kwargs):
-        password = self.validated_data.get('password')
-        self.instance.set_password(password)
-        self.instance.save()
         self.recovery_obj.is_used = True
         self.recovery_obj.save()
         self.instance.is_2fa_enabled = False
         self.instance.save()
         return self.instance
 
-    def to_representation(self, instance):
-        return instance.auth_tokens
+    def to_representation(self, instance: SecondStepVerificationConfig):
+        return instance.authentication.auth_tokens
 
 
 class RecoveryCodeSerializer(ModelSerializer):

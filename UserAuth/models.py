@@ -234,7 +234,7 @@ class SecondStepVerificationConfig(Model):
         result = super().save(*args, **kwargs)
         if generate_codes:
             for _ in range(10):
-                RecoveryCode.objects.create(authentication=self)
+                RecoveryCode.objects.create(second_step_config=self)
         return result
 
 
