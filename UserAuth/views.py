@@ -10,6 +10,7 @@ from rest_framework.parsers import JSONParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.serializers import Serializer
 from rest_framework.viewsets import GenericViewSet
 from webauthn import generate_registration_options, options_to_json, verify_registration_response, \
     generate_authentication_options, verify_authentication_response
@@ -30,6 +31,30 @@ from UserAuth.social_login import SocialAuthHandler
 from UserAuth.tasks import send_new_authentication_app_created_email, generate_and_send_verification_otp, \
     send_2fa_otp, send_reset_password_email
 from Users.models import User
+
+
+def get_login_response(request: Request, auth: Authentication, ser: Serializer) -> Response:
+    if not auth.is_2fa_enabled:
+        return Response(ser.data)
+    status_code = status.HTTP_206_PARTIAL_CONTENT
+    data = ser.data
+    session_id = data['session_id']
+    request.session['incomplete_login_session_id'] = str(session_id)
+    request.session.set_expiry(timedelta(minutes=30))
+    request.session.save()
+    data = {}
+    return Response(data, status=status_code)
+
+
+def get_challenge(request: Request):
+    challenge_base64 = request.session.get('challenge')
+    if not challenge_base64:
+        raise ValueError("Challenge not found")
+    try:
+        challenge = base64.urlsafe_b64decode(challenge_base64)
+    except Exception as e:
+        raise ValueError(f"Error decoding challenge: {str(e)}")
+    return challenge
 
 
 class AuthenticationViewSet(GenericViewSet):
@@ -80,17 +105,13 @@ class AuthenticationViewSet(GenericViewSet):
         url_path='c-passkey-register',
         parser_classes=[JSONParser],
     )
-    def complete_passkey_registration(self, request, *args, **kwargs):
+    def complete_passkey_registration(self, request: Request, *args, **kwargs):
         credential = request.data
 
-        challenge_base64 = request.session.get('challenge')
-        if not challenge_base64:
-            return Response({"error": "Challenge not found"}, status=400)
         try:
-            challenge = base64.urlsafe_b64decode(challenge_base64)
-        except Exception as e:
-            return Response({"error": f"Error decoding challenge: {str(e)}"}, status=400)
-
+            challenge = get_challenge(request)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         user = User.objects.all().first()
 
         try:
@@ -317,18 +338,7 @@ class LoginViewSet(GenericViewSet):
         ser = self.get_serializer(data=request.data)
         ser.is_valid(raise_exception=True)
         auth = ser.save()
-        if auth.is_2fa_enabled:
-            status_code = status.HTTP_206_PARTIAL_CONTENT
-            data = ser.data
-            session_id = data['session_id']
-            request.session['incomplete_login_session_id'] = str(session_id)
-            request.session.set_expiry(timedelta(minutes=30))
-            request.session.save()
-            data = {}
-        else:
-            status_code = status.HTTP_200_OK
-            data = ser.data
-        return Response(data, status=status_code)
+        return get_login_response(request, auth, ser)
 
 
 class SecondStepLoginViewSet(GenericViewSet):
@@ -396,7 +406,7 @@ class SecondStepLoginViewSet(GenericViewSet):
     )
     def verify_app_otp(self, request, *args, **kwargs):
         try:
-            second_step_config: OTPAuthentication = request.user.authentication.secondstep_verification
+            second_step_config: SecondStepVerificationConfig = request.user.authentication.secondstep_verification
         except SecondStepVerificationConfig.DoesNotExist:
             raise PermissionDenied('Session invalid')
 
@@ -468,13 +478,10 @@ class PasskeyViewSet(GenericViewSet):
     )
     def complete_passkey_authentication(self, request, *args, **kwargs):
         credential = request.data
-        challenge_base64 = request.session.get('challenge')
-        if not challenge_base64:
-            return Response({"error": "Challenge not found"}, status=400)
         try:
-            challenge = base64.urlsafe_b64decode(challenge_base64)
-        except Exception as e:
-            return Response({"error": f"Error decoding challenge: {str(e)}"}, status=400)
+            challenge = get_challenge(request)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
         try:
             auth_credential = parse_authentication_credential_json(credential)
         except Exception as e:
@@ -504,21 +511,7 @@ class PasskeyViewSet(GenericViewSet):
         ser.save()
         ser = LoginSerializer(auth)
         ser.save()
-        if auth.is_2fa_enabled:
-            status_code = status.HTTP_206_PARTIAL_CONTENT
-            data = ser.data
-            session_id = data['session_id']
-            request.session['incomplete_login_session_id'] = str(session_id)
-            request.session.set_expiry(timedelta(minutes=30))
-            request.session.save()
-            data = {}
-        else:
-            status_code = status.HTTP_200_OK
-            data = ser.data
-        return Response(
-            status=status_code,
-            data=data,
-        )
+        return get_login_response(request, auth, ser)
 
 
 class ResetPasswordViewSet(GenericViewSet):
@@ -629,18 +622,7 @@ class SocialLoginViewSet(GenericViewSet):
         handler.create_auth()
         ser = LoginSerializer(user.authentication)
         ser.save()
-        if user.authentication.is_2fa_enabled:
-            status_code = status.HTTP_206_PARTIAL_CONTENT
-            data = ser.data
-            session_id = data['session_id']
-            request.session['incomplete_login_session_id'] = str(session_id)
-            request.session.set_expiry(timedelta(minutes=30))
-            request.session.save()
-            data = {}
-        else:
-            status_code = status.HTTP_200_OK
-            data = ser.data
-        return Response(data, status=status_code)
+        return get_login_response(request, user.authentication, ser)
 
     @action(methods=["post"], detail=False, url_path="google")
     def google_login(self, request, *args, **kwargs):
