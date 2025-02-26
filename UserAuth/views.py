@@ -60,18 +60,6 @@ def get_challenge(request: Request):
 class AuthenticationViewSet(GenericViewSet):
     @action(
         detail=False,
-        methods=["POST"],
-        serializer_class=RegisterSerializer
-    )
-    def register(self, request, *args, **kwargs):
-        ser = self.get_serializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        user = ser.save()
-        generate_and_send_verification_otp.delay(str(user.id))
-        return Response(data=ser.data, status=status.HTTP_201_CREATED)
-
-    @action(
-        detail=False,
         methods=['get'],
         url_path='b-passkey-registration',
     )
@@ -313,6 +301,23 @@ class AuthenticationViewSet(GenericViewSet):
         ser.is_valid(raise_exception=True)
         ser.save()
         return Response(ser.data, status=status.HTTP_200_OK)
+
+
+class RegisterViewSet(GenericViewSet):
+    @action(
+        detail=False,
+        methods=['POST'],
+        url_path='password',
+        permission_classes=[AllowAny],
+        serializer_class=RegisterSerializer
+    )
+    def register(self, request, *args, **kwargs):
+        ser = self.get_serializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        user = ser.save()
+        auth = user.authentication
+        generate_and_send_verification_otp.delay(str(user.id))
+        return get_login_response(request, auth, ser)
 
 
 class LoginViewSet(GenericViewSet):

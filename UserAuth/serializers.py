@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from django.core import signing
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.fields import CharField, SerializerMethodField, EmailField
 from rest_framework.serializers import ModelSerializer, Serializer
 
@@ -39,7 +39,7 @@ class AuthenticationMethodsSerializer(ModelSerializer):
         try:
             self.instance = Authentication.objects.get(email=value)
         except Authentication.DoesNotExist:
-            raise ValidationError(_('Email does not exist'))
+            raise PermissionDenied(_('Email does not exist'))
         if not self.instance.user.is_active:
             raise ValidationError(_('Account is inactive'))
         return value
@@ -88,6 +88,9 @@ class RegisterSerializer(ModelSerializer):
         email = self.validated_data.get('email')
         self.instance = User.objects.create_user(email=email, password=password, is_active=False)
         return self.instance
+
+    def to_representation(self, instance: User):
+        return instance.authentication.auth_tokens
 
 
 class VerifyEmailOTPSerializer(Serializer):
