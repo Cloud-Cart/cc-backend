@@ -11,13 +11,10 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.serializers import Serializer
 from rest_framework.viewsets import GenericViewSet
-from webauthn import generate_registration_options, options_to_json, verify_registration_response
-from webauthn.helpers import generate_challenge, parse_registration_credential_json
-from webauthn.helpers.structs import PublicKeyCredentialDescriptor, PublicKeyCredentialType
 
 from UserAuth.authentications import IncompleteLoginAuthentication, ResetPasswordAuthentication
-from UserAuth.choices import OTPPurpose
-from UserAuth.models import OTPAuthentication, HOTPAuthentication, Authentication, RecoveryCode, WebAuthnCredential, \
+from UserAuth.choices import OTPPurpose, SocialAuthenticationMethod
+from UserAuth.models import OTPAuthentication, HOTPAuthentication, Authentication, RecoveryCode, \
     SecondStepVerificationConfig
 from UserAuth.passkeys import generate_auth_options, bytes_to_str, str_to_bytes
 from UserAuth.permissions import IsOwnAuthenticator
@@ -45,88 +42,7 @@ def get_login_response(request: Request, auth: Authentication, ser: Serializer) 
     return Response(data, status=status_code)
 
 
-def get_challenge(request: Request):
-    challenge_base64 = request.session.get('challenge')
-    if not challenge_base64:
-        raise ValueError("Challenge not found")
-    try:
-        challenge = base64.urlsafe_b64decode(challenge_base64)
-    except Exception as e:
-        raise ValueError(f"Error decoding challenge: {str(e)}")
-    return challenge
-
-
 class AuthenticationViewSet(GenericViewSet):
-    @action(
-        detail=False,
-        methods=['get'],
-        url_path='b-passkey-registration',
-    )
-    def begin_passkey_registration(self, request, *args, **kwargs):
-        user = User.objects.all().first()
-        challenge = generate_challenge()
-        challenge_base64 = base64.urlsafe_b64encode(challenge).decode('utf-8')
-        request.session['challenge'] = challenge_base64
-        request.session.save()
-
-        options = generate_registration_options(
-            rp_id="localhost",
-            rp_name="Cloud Cart",
-            user_name=user.first_name,
-            user_id=str(user.id).encode(),
-            user_display_name=f"{user.first_name} {user.last_name}",
-            challenge=challenge,
-            exclude_credentials=[
-                PublicKeyCredentialDescriptor(
-                    id=cred.credential_id_byte,
-                    type=PublicKeyCredentialType.PUBLIC_KEY if cred.type == 'public-key' else None,
-                )
-                for cred in user.authentication.webauthn_credentials.all()
-            ]
-        )
-        return Response(options_to_json(options))
-
-    @action(
-        detail=False,
-        methods=['post'],
-        url_path='c-passkey-register',
-        parser_classes=[JSONParser],
-    )
-    def complete_passkey_registration(self, request: Request, *args, **kwargs):
-        credential = request.data
-
-        try:
-            challenge = get_challenge(request)
-        except ValueError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        user = User.objects.all().first()
-
-        try:
-            reg_credential = parse_registration_credential_json(credential)
-        except Exception as e:
-            return Response({"error": str(e)}, status=400)
-        try:
-            verification_result = verify_registration_response(
-                credential=reg_credential,
-                expected_challenge=challenge,
-                expected_rp_id="localhost",  # This should match your server's RP ID
-                expected_origin="http://localhost:3000",  # Update with your frontend URL
-                require_user_verification=True,
-            )
-        except Exception as e:
-            return Response({"error": f"Verification failed: {str(e)}"}, status=400)
-
-        WebAuthnCredential.objects.create(
-            authentication=user.authentication,
-            credential_id=credential['id'],
-            credential_id_byte=verification_result.credential_id,
-            public_key=verification_result.credential_public_key,
-            sign_count=verification_result.sign_count,
-            type=verification_result.credential_type.value
-        )
-
-        return Response({"success": True})
-
     @action(
         url_path='create-hotp-authentication',
         methods=['POST'],
@@ -303,11 +219,12 @@ class AuthenticationViewSet(GenericViewSet):
 
 
 class RegisterViewSet(GenericViewSet):
+    permission_classes = [AllowAny]
+
     @action(
         detail=False,
         methods=['POST'],
         url_path='password',
-        permission_classes=[AllowAny],
         serializer_class=RegisterPasswordSerializer
     )
     def register_with_password(self, request, *args, **kwargs):
@@ -322,7 +239,6 @@ class RegisterViewSet(GenericViewSet):
         detail=False,
         methods=['POST'],
         url_path='begin-passkey',
-        permission_classes=[AllowAny],
         serializer_class=BeginPasskeyRegistrationSerializer
     )
     def begin_passkey_registration(self, request, *args, **kwargs):
@@ -339,7 +255,6 @@ class RegisterViewSet(GenericViewSet):
         detail=False,
         methods=['POST'],
         url_path='complete-passkey',
-        permission_classes=[AllowAny],
         serializer_class=CompletePasskeyRegistrationSerializer,
         parser_classes=[JSONParser]
     )
@@ -355,15 +270,16 @@ class RegisterViewSet(GenericViewSet):
         challenge_bytes = base64.b64decode(challenge)
         ser = CompletePasskeyRegistrationSerializer(data=request.data, challenge=challenge_bytes)
         ser.is_valid(raise_exception=True)
-        ser.save()
-        return Response(ser.data, status=status.HTTP_200_OK)
+        user = ser.save()
+        return get_login_response(request, auth=user.authentication, ser=ser)
 
 
 class LoginViewSet(GenericViewSet):
+    permission_classes = [AllowAny]
+
     @action(
         detail=False,
         methods=['post'],
-        permission_classes=[AllowAny],
         serializer_class=AuthenticationMethodsSerializer,
         url_path='methods'
     )
@@ -413,7 +329,6 @@ class LoginViewSet(GenericViewSet):
         detail=False,
         methods=['post'],
         url_path='complete-passkey',
-        permission_classes=[AllowAny],
         parser_classes=[JSONParser],
         serializer_class=CompletePasskeyAuthenticationSerializer
     )
@@ -432,6 +347,104 @@ class LoginViewSet(GenericViewSet):
         user = ser.save()
         auth = user.authentication
         return get_login_response(request, auth, ser)
+
+    @staticmethod
+    def social_auth(request: Request, provider: SocialAuthenticationMethod, code: str, redirect_uri: str):
+        if not code:
+            return Response({"error": "Missing code"}, status=400)
+
+        config = {
+            SocialAuthenticationMethod.GOOGLE: {
+                "token_url": "https://oauth2.googleapis.com/token",
+                "user_info_url": None,
+                "token_payload": {
+                    "client_id": settings.GOOGLE_CLIENT_ID,
+                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                    "grant_type": "authorization_code",
+                },
+            },
+            SocialAuthenticationMethod.MICROSOFT: {
+                "token_url": f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
+                "user_info_url": "https://graph.microsoft.com/v1.0/me",
+                "token_payload": {
+                    "client_id": settings.MICROSOFT_CLIENT_ID,
+                    "client_secret": settings.MICROSOFT_CLIENT_SECRET,
+                    "grant_type": "authorization_code",
+                },
+            },
+            SocialAuthenticationMethod.FACEBOOK: {
+                "token_url": "https://graph.facebook.com/v12.0/oauth/access_token",
+                "user_info_url": "https://graph.facebook.com/me?fields=id,name,email,verified",
+                "token_payload": {
+                    "client_id": settings.FACEBOOK_APP_ID,
+                    "client_secret": settings.FACEBOOK_APP_SECRET,
+                },
+            },
+        }
+
+        if provider not in config:
+            return Response({"error": "Invalid provider"}, status=400)
+
+        handler = SocialAuthHandler(provider, **config[provider])
+        tokens = handler.exchange_code(code, redirect_uri)
+        if not tokens:
+            return Response({"error": "Token exchange failed"}, status=400)
+
+        access_token = tokens.get("access_token")
+        id_token = tokens.get("id_token")
+
+        try:
+            email, name = handler.extract_user_info(access_token, id_token)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+
+        if not email:
+            return Response({"error": "Email not found"}, status=400)
+
+        user = handler.get_or_create_user(email, name, provider)
+        handler.create_auth()
+        ser = LoginSerializer(user.authentication)
+        ser.save()
+        return get_login_response(request, user.authentication, ser)
+
+    @action(
+        methods=["POST"],
+        detail=False,
+        url_path="google",
+    )
+    def google_login(self, request, *args, **kwargs):
+        return self.social_auth(
+            request,
+            SocialAuthenticationMethod.GOOGLE,
+            request.data.get("code"),
+            request.data.get("redirect_uri")
+        )
+
+    @action(
+        methods=["POST"],
+        detail=False,
+        url_path="microsoft"
+    )
+    def microsoft_login(self, request, *args, **kwargs):
+        return self.social_auth(
+            request,
+            SocialAuthenticationMethod.MICROSOFT,
+            request.data.get("code"),
+            request.data.get("redirect_uri")
+        )
+
+    @action(
+        methods=["POST"],
+        detail=False,
+        url_path="facebook"
+    )
+    def facebook_login(self, request, *args, **kwargs):
+        return self.social_auth(
+            request,
+            SocialAuthenticationMethod.FACEBOOK,
+            request.data.get("code"),
+            request.data.get("redirect_uri")
+        )
 
 
 class SecondStepLoginViewSet(GenericViewSet):
@@ -572,78 +585,3 @@ class ResetPasswordViewSet(GenericViewSet):
         ser.save()
         request.session.delete('reset_password_user_id')
         return Response(status=status.HTTP_200_OK, data=ser.data)
-
-
-class SocialLoginViewSet(GenericViewSet):
-    permission_classes = [AllowAny]
-
-    @staticmethod
-    def social_auth(request: Request, provider: str, code: str, redirect_uri: str):
-        if not code:
-            return Response({"error": "Missing code"}, status=400)
-
-        config = {
-            "google": {
-                "token_url": "https://oauth2.googleapis.com/token",
-                "user_info_url": None,
-                "token_payload": {
-                    "client_id": settings.GOOGLE_CLIENT_ID,
-                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
-                    "grant_type": "authorization_code",
-                },
-            },
-            "microsoft": {
-                "token_url": f"https://login.microsoftonline.com/{settings.MICROSOFT_TENANT_ID}/oauth2/v2.0/token",
-                "user_info_url": "https://graph.microsoft.com/v1.0/me",
-                "token_payload": {
-                    "client_id": settings.MICROSOFT_CLIENT_ID,
-                    "client_secret": settings.MICROSOFT_CLIENT_SECRET,
-                    "grant_type": "authorization_code",
-                },
-            },
-            "facebook": {
-                "token_url": "https://graph.facebook.com/v12.0/oauth/access_token",
-                "user_info_url": "https://graph.facebook.com/me?fields=id,name,email,verified",
-                "token_payload": {
-                    "client_id": settings.FACEBOOK_APP_ID,
-                    "client_secret": settings.FACEBOOK_APP_SECRET,
-                },
-            },
-        }
-
-        if provider not in config:
-            return Response({"error": "Invalid provider"}, status=400)
-
-        handler = SocialAuthHandler(provider, **config[provider])
-        tokens = handler.exchange_code(code, redirect_uri)
-        if not tokens:
-            return Response({"error": "Token exchange failed"}, status=400)
-
-        access_token = tokens.get("access_token")
-        id_token = tokens.get("id_token")
-
-        try:
-            email, name = handler.extract_user_info(access_token, id_token)
-        except ValueError as e:
-            return Response({"error": str(e)}, status=400)
-
-        if not email:
-            return Response({"error": "Email not found"}, status=400)
-
-        user = handler.get_or_create_user(email, name)
-        handler.create_auth()
-        ser = LoginSerializer(user.authentication)
-        ser.save()
-        return get_login_response(request, user.authentication, ser)
-
-    @action(methods=["post"], detail=False, url_path="google")
-    def google_login(self, request, *args, **kwargs):
-        return self.social_auth(request, "google", request.data.get("code"), request.data.get("redirect_uri"))
-
-    @action(methods=["post"], detail=False, url_path="microsoft")
-    def microsoft_login(self, request, *args, **kwargs):
-        return self.social_auth(request, "microsoft", request.data.get("code"), request.data.get("redirect_uri"))
-
-    @action(methods=["post"], detail=False, url_path="facebook")
-    def facebook_login(self, request, *args, **kwargs):
-        return self.social_auth(request, "facebook", request.data.get("code"), request.data.get("redirect_uri"))
