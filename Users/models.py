@@ -62,9 +62,9 @@ class User(AbstractUser):
     def has_usable_password(self):
         return self.authentication.has_usable_password()
 
-    def save(self, *args, **kwargs):
+    def save(self, *args, save_auth=False, **kwargs):
         r = super().save(*args, **kwargs)
-        if self._save_auth:
+        if self._save_auth or save_auth:
             self.authentication.save()
             self._save_auth = False
         return r

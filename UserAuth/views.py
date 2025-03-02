@@ -2,7 +2,6 @@ import base64
 from datetime import timedelta
 
 from django.conf import settings
-from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError, PermissionDenied
@@ -12,22 +11,21 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.serializers import Serializer
 from rest_framework.viewsets import GenericViewSet
-from webauthn import generate_registration_options, options_to_json, verify_registration_response, \
-    generate_authentication_options, verify_authentication_response
-from webauthn.helpers import generate_challenge, parse_registration_credential_json, \
-    parse_authentication_credential_json
+from webauthn import generate_registration_options, options_to_json, verify_registration_response
+from webauthn.helpers import generate_challenge, parse_registration_credential_json
 from webauthn.helpers.structs import PublicKeyCredentialDescriptor, PublicKeyCredentialType
 
 from UserAuth.authentications import IncompleteLoginAuthentication, ResetPasswordAuthentication
 from UserAuth.choices import OTPPurpose
 from UserAuth.models import OTPAuthentication, HOTPAuthentication, Authentication, RecoveryCode, WebAuthnCredential, \
     SecondStepVerificationConfig
+from UserAuth.passkeys import generate_auth_options, bytes_to_str, str_to_bytes
 from UserAuth.permissions import IsOwnAuthenticator
 from UserAuth.serializers import RegisterPasswordSerializer, VerifyEmailOTPSerializer, AuthenticatorAppSerializer, \
     LoginSerializer, RecoveryCodeSerializer, \
     UpdatePasswordSerializer, AuthenticationMethodsSerializer, TwoFactorSettingsSerializer, VerifyHOTPAppSerializer, \
     ResetPasswordRequestSerializer, ResetPasswordVerifySerializer, ResetPasswordSerializer, RecoverAccountSerializer, \
-    BeginPasskeyRegistrationSerializer, CompletePasskeyRegistrationSerializer
+    BeginPasskeyRegistrationSerializer, CompletePasskeyRegistrationSerializer, CompletePasskeyAuthenticationSerializer
 from UserAuth.social_login import SocialAuthHandler
 from UserAuth.tasks import send_new_authentication_app_created_email, generate_and_send_verification_otp, \
     send_2fa_otp, send_reset_password_email
@@ -333,7 +331,7 @@ class RegisterViewSet(GenericViewSet):
         ser.save()
         challenge = ser.challenge
         encoded_challenge = base64.b64encode(challenge).decode('utf-8')
-        request.session['passkey-registration_challenge'] = encoded_challenge
+        request.session['passkey-registration-challenge'] = encoded_challenge
         request.session.set_expiry(360)
         request.session.save()
         return Response(ser.data, status=status.HTTP_200_OK)
@@ -347,14 +345,14 @@ class RegisterViewSet(GenericViewSet):
         parser_classes=[JSONParser]
     )
     def complete_passkey_registration(self, request, *args, **kwargs):
-        if not request.session.get('passkey-registration_challenge'):
+        if not request.session.get('passkey-registration-challenge'):
             return Response(
                 {
                     'error': 'Passkey registration challenge required',
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
-        challenge: str = request.session.get('passkey-registration_challenge')
+        challenge: str = request.session.get('passkey-registration-challenge')
         challenge_bytes = base64.b64decode(challenge)
         ser = CompletePasskeyRegistrationSerializer(data=request.data, challenge=challenge_bytes)
         ser.is_valid(raise_exception=True)
@@ -385,6 +383,56 @@ class LoginViewSet(GenericViewSet):
         ser = self.get_serializer(data=request.data)
         ser.is_valid(raise_exception=True)
         auth = ser.save()
+        return get_login_response(request, auth, ser)
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='begin-passkey',
+        permission_classes=[AllowAny],
+    )
+    def begin_passkey_authentication(self, request, *args, **kwargs):
+        email = request.query_params.get('email')
+        user = None
+        if email:
+            try:
+                auth = Authentication.objects.get(user__email=email)
+            except Authentication.DoesNotExist:
+                raise ValidationError('Invalid email')
+            else:
+                user = auth.user
+        challenge, options = generate_auth_options(user)
+        challenge_str = bytes_to_str(challenge)
+        request.session['passkey-authentication-challenge'] = challenge_str
+        request.session.set_expiry(360)
+        request.session.save()
+        data = {
+            'options': options,
+        }
+        return Response(data, status=status.HTTP_200_OK)
+
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='complete-passkey',
+        permission_classes=[AllowAny],
+        parser_classes=[JSONParser],
+        serializer_class=CompletePasskeyAuthenticationSerializer
+    )
+    def complete_passkey_authentication(self, request, *args, **kwargs):
+        if not request.session.get('passkey-authentication-challenge'):
+            return Response(
+                {
+                    'error': 'Passkey authentication challenge required',
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        challenge_str: str = request.session.pop('passkey-authentication-challenge')
+        challenge = str_to_bytes(challenge_str)
+        ser = self.get_serializer(data=request.data, challenge=challenge)
+        ser.is_valid(raise_exception=True)
+        user = ser.save()
+        auth = user.authentication
         return get_login_response(request, auth, ser)
 
 
@@ -478,87 +526,6 @@ class SecondStepLoginViewSet(GenericViewSet):
         ser.save()
         request.session.delete('incomplete_login_session_id')
         return Response(ser.data)
-
-
-class PasskeyViewSet(GenericViewSet):
-    @action(
-        detail=False,
-        methods=['get'],
-        url_path='b-passkey-authentication',
-        permission_classes=[AllowAny],
-    )
-    def begin_passkey_authentication(self, request, *args, **kwargs):
-        email = request.query_params.get('email')
-        allow_credentials = []
-        if email:
-            try:
-                auth = Authentication.objects.get(user__email=email)
-            except Authentication.DoesNotExist:
-                raise ValidationError('Invalid email')
-            else:
-                allow_credentials = [
-                    PublicKeyCredentialDescriptor(
-                        id=cred.credential_id_byte,
-                        type=PublicKeyCredentialType.PUBLIC_KEY if cred.type == 'public-key' else None,
-                    )
-                    for cred in auth.webauthn_credentials.all()
-                ]
-
-        challenge = generate_challenge()
-        challenge_base64 = base64.urlsafe_b64encode(challenge).decode('utf-8')
-        request.session['challenge'] = challenge_base64
-        request.session.save()
-        complex_authentication_options = generate_authentication_options(
-            rp_id="localhost",
-            challenge=challenge,
-            allow_credentials=allow_credentials,
-            timeout=12000,
-        )
-        return Response(options_to_json(complex_authentication_options))
-
-    @action(
-        detail=False,
-        methods=['post'],
-        url_path='c-passkey-authentication',
-        permission_classes=[AllowAny],
-        parser_classes=[JSONParser],
-    )
-    def complete_passkey_authentication(self, request, *args, **kwargs):
-        credential = request.data
-        try:
-            challenge = get_challenge(request)
-        except ValueError as e:
-            return Response({'error': str(e)}, status=400)
-        try:
-            auth_credential = parse_authentication_credential_json(credential)
-        except Exception as e:
-            return Response({"error": str(e)}, status=400)
-        try:
-            web_authn = WebAuthnCredential.objects.get(credential_id=credential['id'])
-        except WebAuthnCredential.DoesNotExist:
-            return Response({"error": "WebAuthnCredential not found"}, status=400)
-        try:
-            verification_result = verify_authentication_response(
-                credential=auth_credential,
-                expected_challenge=challenge,
-                expected_rp_id="localhost",  # This should match your server's RP ID
-                expected_origin="http://localhost:3000",  # Update with your frontend URL
-                require_user_verification=True,
-                credential_public_key=web_authn.public_key,
-                credential_current_sign_count=web_authn.sign_count
-            )
-        except Exception as e:
-            return Response({"error": f"Verification failed: {str(e)}"}, status=400)
-        web_authn.sign_count = verification_result.new_sign_count
-        web_authn.save()
-        auth = web_authn.authentication
-        auth.user.last_login = timezone.now()
-        auth.user.save()
-        ser = LoginSerializer(auth)
-        ser.save()
-        ser = LoginSerializer(auth)
-        ser.save()
-        return get_login_response(request, auth, ser)
 
 
 class ResetPasswordViewSet(GenericViewSet):

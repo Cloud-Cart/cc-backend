@@ -9,13 +9,15 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.fields import CharField, SerializerMethodField, EmailField, UUIDField, JSONField
 from rest_framework.serializers import ModelSerializer, Serializer
-from webauthn.helpers.exceptions import InvalidRegistrationResponse
+from webauthn import base64url_to_bytes
+from webauthn.authentication.verify_authentication_response import VerifiedAuthentication
+from webauthn.helpers.exceptions import InvalidRegistrationResponse, InvalidAuthenticationResponse
 from webauthn.registration.verify_registration_response import VerifiedRegistration
 
 from UserAuth.choices import DefaultAuthenticationMethod
 from UserAuth.models import Authentication, HOTPAuthentication, OTPAuthentication, IncompleteLoginSessions, \
     RecoveryCode, SecondStepVerificationConfig, WebAuthnCredential
-from UserAuth.passkeys import generate_reg_options, verify_reg_response
+from UserAuth.passkeys import generate_reg_options, verify_reg_response, verify_auth_response, bytes_to_str
 from Users.models import User
 
 
@@ -64,7 +66,7 @@ class AuthenticationMethodsSerializer(ModelSerializer):
 
 class RegisterPasswordSerializer(ModelSerializer):
     confirm_password = CharField(write_only=True)
-    password = CharField(write_only=True, )
+    password = CharField(write_only=True)
 
     class Meta:
         model = User
@@ -72,12 +74,20 @@ class RegisterPasswordSerializer(ModelSerializer):
             'id',
             'email',
             'password',
+            'first_name',
+            'last_name',
             'confirm_password',
         ]
         extra_kwargs = {
             'password': {
                 'write_only': True,
                 'min_length': 8,
+            },
+            'first_name': {
+                'required': True,
+            },
+            'last_name': {
+                'required': True,
             }
         }
 
@@ -91,7 +101,7 @@ class RegisterPasswordSerializer(ModelSerializer):
     def save(self):
         password = self.validated_data.pop('password')
         email = self.validated_data.get('email')
-        self.instance = User.objects.create_user(email=email, password=password, is_active=False)
+        self.instance = User.objects.create_user(email=email, password=password)
         self.instance.authentication.default_method = DefaultAuthenticationMethod.PASSWORD_SIGNIN
         self.instance.authentication.save()
         return self.instance
@@ -160,7 +170,7 @@ class BeginPasskeyRegistrationSerializer(Serializer):
 
 
 class CompletePasskeyRegistrationSerializer(Serializer):
-    response = JSONField(required=True)
+    response = JSONField(required=True, write_only=True)
     userId = UUIDField(required=True, source='id')
 
     def __init__(self, challenge: bytes, *args, **kwargs):
@@ -199,11 +209,50 @@ class CompletePasskeyRegistrationSerializer(Serializer):
         )
         self.instance.set_unusable_password()
         self.instance.authentication.default_method = DefaultAuthenticationMethod.PASSKEY_SIGNIN
-        self.instance.save()
+        self.instance.save(save_auth=True)
         return self.instance
 
     def to_representation(self, instance):
-        return instance.authentication.auth_tokens
+        return self.instance.authentication.auth_tokens
+
+
+class CompletePasskeyAuthenticationSerializer(Serializer):
+    response = JSONField(required=True)
+
+    def __init__(self, challenge: bytes, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.challenge = challenge
+        self.credential: Optional[WebAuthnCredential] = None
+        self.verification: Optional[VerifiedAuthentication] = None
+
+    def validate_response(self, response):
+        credential_raw_id = response.get('rawId')
+        try:
+            self.credential = WebAuthnCredential.objects.get(credential_id=base64url_to_bytes(credential_raw_id))
+        except WebAuthnCredential.DoesNotExist:
+            raise ValidationError(_('Credential does not exist.'))
+        try:
+            self.verification, self.credential = verify_auth_response(
+                response,
+                challenge=self.challenge,
+                credential=self.credential
+            )
+        except InvalidAuthenticationResponse as e:
+            raise ValidationError(_('Authentication failed'))
+        user_id_bytes = base64url_to_bytes(response['response']['userHandle'])
+        user_id = bytes_to_str(user_id_bytes)
+        try:
+            self.instance = User.objects.get(pk=user_id, is_registration_completed=True)
+        except User.DoesNotExist:
+            raise ValidationError(_('User does not exist'))
+        return response
+
+    def save(self, **kwargs):
+        self.credential.save()
+        return self.instance
+
+    def to_representation(self, instance):
+        return self.instance.authentication.auth_tokens
 
 
 class VerifyEmailOTPSerializer(Serializer):
