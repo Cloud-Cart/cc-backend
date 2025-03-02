@@ -332,7 +332,6 @@ class RegisterViewSet(GenericViewSet):
         challenge = ser.challenge
         encoded_challenge = base64.b64encode(challenge).decode('utf-8')
         request.session['passkey-registration-challenge'] = encoded_challenge
-        request.session.set_expiry(360)
         request.session.save()
         return Response(ser.data, status=status.HTTP_200_OK)
 
@@ -352,7 +351,7 @@ class RegisterViewSet(GenericViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
-        challenge: str = request.session.get('passkey-registration-challenge')
+        challenge: str = request.session.pop('passkey-registration-challenge')
         challenge_bytes = base64.b64decode(challenge)
         ser = CompletePasskeyRegistrationSerializer(data=request.data, challenge=challenge_bytes)
         ser.is_valid(raise_exception=True)
@@ -404,7 +403,6 @@ class LoginViewSet(GenericViewSet):
         challenge, options = generate_auth_options(user)
         challenge_str = bytes_to_str(challenge)
         request.session['passkey-authentication-challenge'] = challenge_str
-        request.session.set_expiry(360)
         request.session.save()
         data = {
             'options': options,
