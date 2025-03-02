@@ -1,16 +1,21 @@
 import os
 import re
 from datetime import datetime, timedelta
+from typing import Optional
 
 from django.core import signing
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from rest_framework.exceptions import ValidationError, PermissionDenied
-from rest_framework.fields import CharField, SerializerMethodField, EmailField
+from rest_framework.fields import CharField, SerializerMethodField, EmailField, UUIDField, JSONField
 from rest_framework.serializers import ModelSerializer, Serializer
+from webauthn.helpers.exceptions import InvalidRegistrationResponse
+from webauthn.registration.verify_registration_response import VerifiedRegistration
 
+from UserAuth.choices import DefaultAuthenticationMethod
 from UserAuth.models import Authentication, HOTPAuthentication, OTPAuthentication, IncompleteLoginSessions, \
-    RecoveryCode, SecondStepVerificationConfig
+    RecoveryCode, SecondStepVerificationConfig, WebAuthnCredential
+from UserAuth.passkeys import generate_reg_options, verify_reg_response
 from Users.models import User
 
 
@@ -46,7 +51,7 @@ class AuthenticationMethodsSerializer(ModelSerializer):
 
     @staticmethod
     def get_is_password_available(obj: Authentication):
-        return bool(obj.password)
+        return obj.has_usable_password()
 
     @staticmethod
     def get_is_passkey_available(obj: Authentication):
@@ -57,7 +62,7 @@ class AuthenticationMethodsSerializer(ModelSerializer):
         return list(obj.social_authentications.all().values_list('account', flat=True))
 
 
-class RegisterSerializer(ModelSerializer):
+class RegisterPasswordSerializer(ModelSerializer):
     confirm_password = CharField(write_only=True)
     password = CharField(write_only=True, )
 
@@ -87,9 +92,117 @@ class RegisterSerializer(ModelSerializer):
         password = self.validated_data.pop('password')
         email = self.validated_data.get('email')
         self.instance = User.objects.create_user(email=email, password=password, is_active=False)
+        self.instance.authentication.default_method = DefaultAuthenticationMethod.PASSWORD_SIGNIN
+        self.instance.authentication.save()
         return self.instance
 
     def to_representation(self, instance: User):
+        return instance.authentication.auth_tokens
+
+
+class BeginPasskeyRegistrationSerializer(Serializer):
+    user_id = UUIDField(required=False, source='id')
+    email = EmailField()
+    first_name = CharField(required=True)
+    last_name = CharField(required=True)
+
+    class Meta:
+        fields = (
+            'id',
+            'email',
+            'first_name',
+            'last_name',
+        )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.options = None
+        self.challenge = None
+
+    def validate(self, attrs):
+        user_id = attrs.pop('id', None)
+        email = attrs.get('email')
+        if user_id:
+            try:
+                self.instance = User.objects.get(pk=user_id, email=email, is_registration_completed=False)
+            except User.DoesNotExist:
+                raise ValidationError({
+                    'id': _('User does not exist'),
+                })
+        else:
+            try:
+                User.objects.get(email=email)
+                raise ValidationError({
+                    'email': _('Email already in use.'),
+                })
+            except User.DoesNotExist:
+                pass
+        return attrs
+
+    def create(self, validated_data):
+        return User.objects.create_user(is_registration_completed=False, **validated_data)
+
+    def update(self, instance, validated_data):
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        return instance
+
+    def save(self, **kwargs):
+        instance = super().save(**kwargs)
+        self.challenge, self.options = generate_reg_options(user=instance)
+        return instance
+
+    def to_representation(self, instance: User):
+        data = super().to_representation(instance=instance)
+        data['options'] = self.options
+        return data
+
+
+class CompletePasskeyRegistrationSerializer(Serializer):
+    response = JSONField(required=True)
+    userId = UUIDField(required=True, source='id')
+
+    def __init__(self, challenge: bytes, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.verified_registration: Optional[VerifiedRegistration] = None
+        self.challenge = challenge
+
+    def validate(self, attrs: dict):
+        response = attrs.get('response')
+        user_id = attrs.pop('id')
+        try:
+            self.instance = User.objects.get(pk=user_id, is_registration_completed=False)
+        except User.DoesNotExist:
+            raise ValidationError({
+                'id': _('User does not exist'),
+            })
+        try:
+            self.verified_registration = verify_reg_response(response, challenge=self.challenge)
+        except InvalidRegistrationResponse:
+            raise ValidationError({
+                'response': _('Registration failed'),
+            })
+        return attrs
+
+    def save(self, **kwargs):
+        self.instance.is_registration_completed = True
+        WebAuthnCredential.objects.create(
+            authentication=self.instance.authentication,
+            credential_id=self.verified_registration.credential_id,
+            credential_public_key=self.verified_registration.credential_public_key,
+            sign_count=self.verified_registration.sign_count,
+            credential_device_type=self.verified_registration.credential_device_type.value,
+            transports=self.validated_data.get('response')['response'].get('transports'),
+            credential_backed_up=self.verified_registration.credential_backed_up,
+            aaguid=self.verified_registration.aaguid,
+        )
+        self.instance.set_unusable_password()
+        self.instance.authentication.default_method = DefaultAuthenticationMethod.PASSKEY_SIGNIN
+        self.instance.save()
+        return self.instance
+
+    def to_representation(self, instance):
         return instance.authentication.auth_tokens
 
 

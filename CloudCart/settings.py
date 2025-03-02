@@ -241,3 +241,7 @@ FACEBOOK_APP_SECRET = env.str('FACEBOOK_APP_SECRET', default=None)
 FRONTEND_RESET_PASSWORD_URL = env.str('FRONTEND_RESET_PASSWORD_URL', default=None)
 # You should include "<email>" and "<challenge" as key of variables, values will be taken as search query params key
 RESET_PASSWORD_URL_TOKEN_KEY = env.str('RESET_PASSWORD_URL_TOKEN_KEY', default='token')
+
+PASSKEY_SERVER_NAME = env.str('PASSKEY_SERVER_NAME', default='Cloud Cart')
+PASSKEY_SERVER_ID = env.str('PASSKEY_SERVER_ID', default='localhost')
+FRONTEND_ORIGIN = env.str('FRONTEND_ORIGIN', default='http://localhost:3000')

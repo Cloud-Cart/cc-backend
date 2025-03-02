@@ -23,10 +23,11 @@ from UserAuth.choices import OTPPurpose
 from UserAuth.models import OTPAuthentication, HOTPAuthentication, Authentication, RecoveryCode, WebAuthnCredential, \
     SecondStepVerificationConfig
 from UserAuth.permissions import IsOwnAuthenticator
-from UserAuth.serializers import RegisterSerializer, VerifyEmailOTPSerializer, AuthenticatorAppSerializer, \
+from UserAuth.serializers import RegisterPasswordSerializer, VerifyEmailOTPSerializer, AuthenticatorAppSerializer, \
     LoginSerializer, RecoveryCodeSerializer, \
     UpdatePasswordSerializer, AuthenticationMethodsSerializer, TwoFactorSettingsSerializer, VerifyHOTPAppSerializer, \
-    ResetPasswordRequestSerializer, ResetPasswordVerifySerializer, ResetPasswordSerializer, RecoverAccountSerializer
+    ResetPasswordRequestSerializer, ResetPasswordVerifySerializer, ResetPasswordSerializer, RecoverAccountSerializer, \
+    BeginPasskeyRegistrationSerializer, CompletePasskeyRegistrationSerializer
 from UserAuth.social_login import SocialAuthHandler
 from UserAuth.tasks import send_new_authentication_app_created_email, generate_and_send_verification_otp, \
     send_2fa_otp, send_reset_password_email
@@ -309,15 +310,56 @@ class RegisterViewSet(GenericViewSet):
         methods=['POST'],
         url_path='password',
         permission_classes=[AllowAny],
-        serializer_class=RegisterSerializer
+        serializer_class=RegisterPasswordSerializer
     )
-    def register(self, request, *args, **kwargs):
+    def register_with_password(self, request, *args, **kwargs):
         ser = self.get_serializer(data=request.data)
         ser.is_valid(raise_exception=True)
         user = ser.save()
         auth = user.authentication
         generate_and_send_verification_otp.delay(str(user.id))
         return get_login_response(request, auth, ser)
+
+    @action(
+        detail=False,
+        methods=['POST'],
+        url_path='begin-passkey',
+        permission_classes=[AllowAny],
+        serializer_class=BeginPasskeyRegistrationSerializer
+    )
+    def begin_passkey_registration(self, request, *args, **kwargs):
+        ser: BeginPasskeyRegistrationSerializer = self.get_serializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        challenge = ser.challenge
+        encoded_challenge = base64.b64encode(challenge).decode('utf-8')
+        request.session['passkey-registration_challenge'] = encoded_challenge
+        request.session.set_expiry(360)
+        request.session.save()
+        return Response(ser.data, status=status.HTTP_200_OK)
+
+    @action(
+        detail=False,
+        methods=['POST'],
+        url_path='complete-passkey',
+        permission_classes=[AllowAny],
+        serializer_class=CompletePasskeyRegistrationSerializer,
+        parser_classes=[JSONParser]
+    )
+    def complete_passkey_registration(self, request, *args, **kwargs):
+        if not request.session.get('passkey-registration_challenge'):
+            return Response(
+                {
+                    'error': 'Passkey registration challenge required',
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        challenge: str = request.session.get('passkey-registration_challenge')
+        challenge_bytes = base64.b64decode(challenge)
+        ser = CompletePasskeyRegistrationSerializer(data=request.data, challenge=challenge_bytes)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data, status=status.HTTP_200_OK)
 
 
 class LoginViewSet(GenericViewSet):

@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from django.contrib.auth.hashers import make_password, check_password, acheck_password, is_password_usable
 from django.db.models import Model, CASCADE, OneToOneField, UUIDField, Index, CharField, DateTimeField, EmailField, \
-    BooleanField, ForeignKey, PositiveSmallIntegerField, IntegerField, BinaryField
+    BooleanField, ForeignKey, PositiveSmallIntegerField, IntegerField, BinaryField, JSONField
 from django.db.models.fields import DurationField
 from django.utils import timezone
 from pyotp import random_base32, TOTP
@@ -165,11 +165,13 @@ class WebAuthnCredential(Model):
     id = UUIDField(primary_key=True, default=uuid4, editable=False)
     created_at = DateTimeField(auto_now_add=True)
     authentication = ForeignKey(Authentication, on_delete=CASCADE, related_name='webauthn_credentials')
-    credential_id = CharField(unique=True)
-    credential_id_byte = BinaryField()
-    public_key = BinaryField()
+    credential_id = BinaryField()
+    credential_public_key = BinaryField()
     sign_count = IntegerField(default=0)
-    type = CharField(max_length=120)
+    credential_device_type = CharField(max_length=128)
+    credential_backed_up = BooleanField(default=False)
+    transports = JSONField(default=list)
+    aaguid = CharField(max_length=128)
 
     def __str__(self):
         return f"Web Authn Credential for {self.authentication_id}"

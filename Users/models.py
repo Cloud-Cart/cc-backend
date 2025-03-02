@@ -18,6 +18,10 @@ class User(AbstractUser):
         default=False,
         help_text=_("Designates whether the user can log into this admin site."),
     )
+    is_registration_completed = BooleanField(
+        _("Registration Completed"),
+        default=False,
+    )
     email = EmailField(_("Email Address"), unique=True)
 
     USERNAME_FIELD = 'email'
