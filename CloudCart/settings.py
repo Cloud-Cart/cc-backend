@@ -61,8 +61,6 @@ TENANT_TYPES = {
             'django.contrib.sessions',
             'django.contrib.messages',
             'UserAuth.apps.UserauthConfig',
-            'TenantUsers.apps.TenantusersConfig',
-            'TenantEmails.apps.TenantemailsConfig',
             'corsheaders'
         ],
         "URLCONF": "CloudCart.urls_stores",
