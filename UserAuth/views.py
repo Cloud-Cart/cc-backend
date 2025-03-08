@@ -542,14 +542,15 @@ class SecondStepLoginViewSet(GenericViewSet):
 class ResetPasswordViewSet(GenericViewSet):
     @action(
         detail=False,
-        methods=['post'],
+        methods=['POST'],
         url_path='send-email',
         permission_classes=[AllowAny],
         serializer_class=ResetPasswordRequestSerializer,
     )
     def request_password_reset(self, request: Request, *args, **kwargs):
         ser: ResetPasswordRequestSerializer = self.serializer_class(data=request.data)
-        ser.is_valid(raise_exception=True)
+        if not ser.is_valid():
+           return Response(data={'success': True}, status=status.HTTP_200_OK)
         user, token = ser.save()
         send_reset_password_email.delay(user.email, token)
         return Response(status=status.HTTP_200_OK, data={'success': True})
