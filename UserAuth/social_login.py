@@ -1,6 +1,7 @@
 import jwt
 import requests
 
+from UserAuth.choices import DefaultAuthenticationMethod, SocialAuthenticationMethod
 from UserAuth.models import SocialAuthentications
 from Users.models import User
 
@@ -39,18 +40,23 @@ class SocialAuthHandler:
             name = user_info.get("displayName") or user_info.get("name")
         return email, name
 
-    def get_or_create_user(self, email: str, name: str) -> User:
-        user, created = User.objects.get_or_create(
-            email=email,
-            defaults={
-                "username": name,
-                "first_name": name.split()[0],
-                "last_name": " ".join(name.split()[1:]),
-            },
-        )
-        if created:
-            user.set_unusable_password()
+    def get_or_create_user(self, email: str, name: str, provider: SocialAuthenticationMethod) -> User:
+        first_name = name.split()[0]
+        last_name = " ".join(name.split()[1:])
+        try:
+            user = User.objects.get(email=email)
+            user.first_name = first_name
+            user.last_name = last_name
             user.save()
+        except User.DoesNotExist:
+            user = User.objects.create_user(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+            )
+            user.set_unusable_password()
+            user.authentication.default_method = provider
+            user.save(save_auth=True)
         self.user = user
         return user
 

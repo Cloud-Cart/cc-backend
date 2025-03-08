@@ -18,6 +18,10 @@ class User(AbstractUser):
         default=False,
         help_text=_("Designates whether the user can log into this admin site."),
     )
+    is_registration_completed = BooleanField(
+        _("Registration Completed"),
+        default=False,
+    )
     email = EmailField(_("Email Address"), unique=True)
 
     USERNAME_FIELD = 'email'
@@ -58,9 +62,9 @@ class User(AbstractUser):
     def has_usable_password(self):
         return self.authentication.has_usable_password()
 
-    def save(self, *args, **kwargs):
+    def save(self, *args, save_auth=False, **kwargs):
         r = super().save(*args, **kwargs)
-        if self._save_auth:
+        if self._save_auth or save_auth:
             self.authentication.save()
             self._save_auth = False
         return r
